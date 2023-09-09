@@ -22,4 +22,6 @@ I used Large Language Models (LLMs) like Cohere to answer questions. By providin
 
 You can run processing.py to generate the necessary files. Then save your Cohere API key which you can get from [here](https://docs.cohere.com/docs) in the environment variable `COHERE_API_KEY`. The current `search_index.ann` has already been generated and is available in the repository.
 
-To search for information, use the command line with a question like: `python main.py "What is the meaning of life?"`.
+This is a sample run of the program from the terminal. We've used the question "What is the meaning of life?" as an example.
+<!-- let's import an image from docs/ -->
+![Example](docs/terminal-run.png)

@@ -3,35 +3,65 @@ import cohere
 from annoy import AnnoyIndex
 import warnings
 import os
+import time
+
+RATE_LIMIT = 100  # Requests per minute
+SECONDS_PER_MINUTE = 60
 
 
 def load_paragraphs(directory) -> np.array:
     """ Loads all paragraphs from a directory
+    Each paragraph is separated by <<<{filenumber}>>>
+    But we want to keep the paragraph number too
+    So, we append `<<<` at the beginning of each paragraph
+    
     Returns:
         np.array: Array of all paragraphs
     """
-    texts = []
-    for filename in os.listdir(directory):
-        if filename.endswith('.txt'):
-            with open(os.path.join(directory, filename), 'r', encoding='utf-8') as file:
-                text = file.read()
-                texts.extend(text.split('\n'))
-    return np.array(texts)
+    paragraphs = []
+    for file_name in os.listdir(directory):
+        if file_name.endswith('.txt'):
+            file_path = os.path.join(directory, file_name)
+            with open(file_path, 'r') as file:
+                file_paragraphs = file.read().split('<<<')[1:]
+                file_paragraphs = ['<<<' + f for f in file_paragraphs if len(f) > 500]  # Remove short paragraphs
+                paragraphs.extend(file_paragraphs)
+    return np.array(paragraphs)
 
 
-def get_embeddings(texts, api_key):
-    """ Gets the embeddings for all paragraphs
+def process_and_save_chunks(text_chunks, api_key, output_directory):
+    """Processes and saves text chunks in batches of 100.
+    
+    How much it takes? each episode is roughly 100_000 characters, 
+    each chunk is 2000 characters, so 50 chunks per episode.
+    For ~350 episodes, 50 * 350 = 17_500 chunks / 100 = 175 minutes = 3 hours.
     
     Args:
-        texts (list): List of all paragraphs
-        api_key (str): API key for the Cohere API
-        
-    Returns:
-        np.array: Array of embeddings for all paragraphs
+        text_chunks (np.array): Array of text chunks/paragraphs.
+        api_key (str): API key for the Cohere API.
+        output_directory (str): Directory to save the processed chunks.
     """
+    if not os.path.exists(output_directory):    os.makedirs(output_directory)
     co = cohere.Client(api_key)
-    response = co.embed(texts=texts.tolist())
-    return np.array(response.embeddings)
+    
+    for i in range(0, len(text_chunks), RATE_LIMIT):
+        batch = text_chunks[i:i+RATE_LIMIT]
+        embeddings = co.embed(texts=batch.tolist()).embeddings
+        np.save(f'{output_directory}embeddings_{i}.npy', embeddings)
+        time.sleep(SECONDS_PER_MINUTE)
+
+
+def load_embeddings(output_directory):
+    """Loads and concatenates embeddings saved in batches.
+    Returns:
+        np.array: Concatenated embeddings shaped (num_embeddings, embedding_dim=4096 for cohere)
+    """
+    embeddings = []
+    for file_name in os.listdir(output_directory):
+        if file_name.startswith('embeddings_') and file_name.endswith('.npy'):
+            file_path = os.path.join(output_directory, file_name)
+            embeddings.append(np.load(file_path))
+    return np.concatenate(embeddings, axis=0)
 
 
 def build_search_index(embeddings):
@@ -64,16 +94,9 @@ def search_for_context(query, search_index, texts, num_nearest=3):
 
 def generate_response(question, contexts, api_key):
     co = cohere.Client(api_key)
-    
-    cautions = """
-        These are different views about the topic. Try to consider all of them with a critical eye.
-        If some words at end or beginning of IDEAs are broken, please correct them; it must be typos.
-    """
 
     prompt = f"""
-    Excerpt from the articles provided 
-    It is a complicated matter and not a simple question,
-    therefore think carefully and weigh what you mean.
+    Extract the answer from the following ideas.
 
     Consider the following ideas by different thinkers:
     {'--- Another IDEA: '.join(contexts)}
@@ -81,9 +104,8 @@ def generate_response(question, contexts, api_key):
     Question: {question}
     
     Please note:
-    {cautions}
-
-    Extract the answer of the question from the text provided.
+    - These are different views about the topic. Try to consider all of them with a critical eye.
+    - If some words at end or beginning of IDEAs are broken, please correct them; it must be typos.
     """
 
     prediction = co.generate(
@@ -105,8 +127,9 @@ if __name__ == '__main__':
 
     texts = load_paragraphs('processed_data/')
     
-    embeddings = get_embeddings(texts, api_key)
-    
+    process_and_save_chunks(texts, api_key, 'embeddings/')
+    embeddings = load_embeddings('embeddings/')
+        
     if os.path.exists('search_index.ann'):
         search_index = AnnoyIndex(embeddings.shape[1], 'angular')
         search_index.load('search_index.ann')
@@ -114,6 +137,7 @@ if __name__ == '__main__':
         search_index = build_search_index(embeddings)
     
     query = "What is the meaning of life?"
-    viewpoints = search_for_context(query, search_index, texts, num_nearest=5)
+    print(f"\nQuestion: {query}")
+    viewpoints = search_for_context(query, search_index, texts, num_nearest=3)
     results = generate_response(query, viewpoints, api_key)
-    print(results[0])
+    print(f"Answer: {results[0]}\n")
